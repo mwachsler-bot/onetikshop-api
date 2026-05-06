@@ -186,3 +186,196 @@ async def search_product_image(req: SearchRequest):
     except: pass
 
     raise HTTPException(status_code=404, detail="No image found")
+
+
+# ─────────────────────────────────────────────
+# VISUAL GENERATION VIA CLAUDE + HIGGSFIELD MCP
+# ─────────────────────────────────────────────
+
+class VisualRequest(BaseModel):
+    product_id: str
+    api_key: Optional[str] = None
+    higgsfield_url: str = "https://mcp.higgsfield.ai/mcp"
+
+@app.post("/generate-visuals")
+async def generate_visuals(req: VisualRequest):
+    """
+    Uses Claude API with Higgsfield MCP to generate product images and videos.
+    Claude reads the product details, finds supplier images, and generates visuals.
+    Results are saved to Supabase and returned as URLs.
+    """
+    key = req.api_key or ANTHROPIC_KEY
+    if not key:
+        raise HTTPException(status_code=400, detail="Anthropic API key required")
+
+    # Get product agent outputs from Supabase
+    async with httpx.AsyncClient() as client:
+        outs_res = await client.get(
+            f"{SUPABASE_URL}/rest/v1/agent_outputs?product_id=eq.{req.product_id}&status=eq.done",
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+        )
+    
+    outputs = outs_res.json() if isinstance(outs_res.json(), list) else []
+    out_map = {o["agent_name"]: o["output"] for o in outputs if o.get("output")}
+    
+    analyst = out_map.get("analyst", "")[:2000]
+    sourcer = out_map.get("sourcer", "")[:2000]
+    designer = out_map.get("designer", "")[:1000]
+
+    if not analyst:
+        raise HTTPException(status_code=400, detail="No analyst output found. Run the pipeline first.")
+
+    # Build the prompt for Claude with Higgsfield MCP
+    visual_prompt = f"""You are generating professional product images for a TikTok Shop store.
+
+PRODUCT DATA:
+{analyst}
+
+SOURCER DATA (contains supplier URLs and product images):
+{sourcer}
+
+BRAND DATA:
+{designer}
+
+YOUR TASK - do all of these in order:
+
+1. Extract the exact product name, description, and all color variants from the data above
+
+2. Find the best supplier product image URL from the sourcer data. Look for any image URLs mentioned (aliexpress, cjdropshipping, alibaba image URLs)
+
+3. Generate these 4 images using Higgsfield:
+
+   IMAGE 1 - Hero Shot:
+   - Use nano_banana_2 model
+   - If you found a supplier image URL, use it as reference (image role)
+   - Prompt: "Professional ecommerce product photography, [exact product], [hero color variant], pure white seamless studio background, softbox lighting from 45 degree angle, product centered, ultra sharp detail, commercial quality, photorealistic, no text no logos"
+   - Aspect ratio: 1:1
+   - Resolution: 2k
+
+   IMAGE 2 - Lifestyle Shot:
+   - Use nano_banana_2 model  
+   - Same reference image if available
+   - Prompt: "Lifestyle product photography, [exact product] in [hero color] placed in luxury home setting, warm moody ambient bar lighting, beautiful bokeh background, premium aspirational aesthetic, no people, photorealistic"
+   - Aspect ratio: 4:3
+   - Resolution: 2k
+
+   IMAGE 3 - UGC Shot:
+   - Use soul_2 model (best for realistic human content)
+   - Prompt: "Authentic UGC-style photo, young woman's hands holding [exact product], natural kitchen window light, casual home setting, genuine excited expression partially visible, iPhone photography feel, TikTok aesthetic, photorealistic"
+   - Aspect ratio: 9:16
+   - Resolution: 2k
+
+   IMAGE 4 - Comparison Shot:
+   - Use nano_banana_2 model
+   - Prompt: "Split screen comparison photo, left side shows cheap generic [product type] looking bad, right side shows premium [exact product] in [hero color] looking amazing, dramatic quality difference, studio lighting, photorealistic"
+   - Aspect ratio: 1:1
+   - Resolution: 2k
+
+4. After all images are generated, animate the Hero Shot into a 5-second product video:
+   - Use seedance_2_0 model
+   - Use the hero shot job result as the start_image reference
+   - Prompt: "Product slowly floating and gently rotating, cinematic studio lighting, subtle elegant motion, premium commercial feel"
+   - Aspect ratio: 9:16
+   - Duration: 5 seconds
+
+5. Return a summary of all generated assets with their job IDs and any result URLs
+
+Generate all images now. Do not skip any steps."""
+
+    # Call Claude API with Higgsfield MCP
+    async def stream_visual_generation():
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-api-key": key,
+                        "anthropic-version": "2023-06-01"
+                    },
+                    json={
+                        "model": "claude-sonnet-4-6",
+                        "max_tokens": 4096,
+                        "system": "You are a visual production agent. Use the Higgsfield MCP tools to generate product images and videos. Always complete all requested generations before responding.",
+                        "messages": [{"role": "user", "content": visual_prompt}],
+                        "mcp_servers": [
+                            {
+                                "type": "url",
+                                "url": req.higgsfield_url,
+                                "name": "higgsfield"
+                            }
+                        ]
+                    }
+                )
+                
+                if response.status_code != 200:
+                    error = response.text
+                    yield f"data: {json.dumps({'error': f'Claude API error: {error[:200]}'})}
+
+"
+                    return
+
+                result = response.json()
+                
+                # Extract text from response
+                full_text = ""
+                for block in result.get("content", []):
+                    if block.get("type") == "text":
+                        full_text += block.get("text", "")
+
+                # Parse out any image URLs or job IDs from the response
+                import re
+                urls = re.findall(r'https?://[^\s'"<>]+\.(?:png|jpg|jpeg|webp)', full_text)
+                job_ids = re.findall(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', full_text)
+
+                # Save any found assets to Supabase
+                saved_assets = []
+                asset_types = ['hero_shot', 'lifestyle_shot', 'ugc_shot', 'comparison_shot', 'product_video']
+                
+                for i, url in enumerate(urls[:5]):
+                    asset_type = asset_types[i] if i < len(asset_types) else f'asset_{i}'
+                    async with httpx.AsyncClient() as db_client:
+                        asset_res = await db_client.post(
+                            f"{SUPABASE_URL}/rest/v1/assets",
+                            headers={
+                                "apikey": SUPABASE_KEY,
+                                "Authorization": f"Bearer {SUPABASE_KEY}",
+                                "Content-Type": "application/json",
+                                "Prefer": "return=representation"
+                            },
+                            json={
+                                "product_id": req.product_id,
+                                "asset_type": asset_type,
+                                "file_url": url,
+                                "status": "ready",
+                                "model_used": "higgsfield",
+                                "created_at": datetime.now().isoformat()
+                            }
+                        )
+                        if asset_res.status_code in [200, 201]:
+                            saved_assets.append({"type": asset_type, "url": url})
+
+                yield f"data: {json.dumps({'status': 'complete', 'text': full_text, 'assets': saved_assets, 'urls': urls, 'job_ids': job_ids})}
+
+"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}
+
+"
+
+    return StreamingResponse(
+        stream_visual_generation(),
+        media_type="text/event-stream",
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"}
+    )
+
+
+@app.options("/generate-visuals")
+async def generate_visuals_options():
+    return Response(headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+    })
+

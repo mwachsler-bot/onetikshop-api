@@ -469,3 +469,67 @@ async def pipeline_status(product_id: str):
         "product_status": product.data.get("status"),
         "latest_run": runs.data[0] if runs.data else None
     }
+
+
+# ─────────────────────────────────────────────
+# CLAUDE PROXY ENDPOINT (fixes CORS from Netlify)
+# ─────────────────────────────────────────────
+
+from fastapi.responses import StreamingResponse
+import httpx
+
+class ClaudeRequest(BaseModel):
+    system: str
+    user: str
+    stream: bool = True
+    api_key: Optional[str] = None
+
+@app.post("/claude")
+async def claude_proxy(req: ClaudeRequest):
+    """Proxy Claude API calls from the frontend to avoid CORS issues."""
+    key = req.api_key or ANTHROPIC_KEY
+    if not key:
+        raise HTTPException(status_code=400, detail="Anthropic API key required")
+
+    async def generate():
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream(
+                "POST",
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01"
+                },
+                json={
+                    "model": "claude-sonnet-4-6",
+                    "max_tokens": 4096,
+                    "stream": True,
+                    "system": req.system,
+                    "messages": [{"role": "user", "content": req.user}]
+                }
+            ) as response:
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        try:
+                            data = json.loads(line[6:])
+                            if data.get("type") == "content_block_delta":
+                                text = data.get("delta", {}).get("text", "")
+                                if text:
+                                    yield f"data: {json.dumps({'text': text})}\n\n"
+                            elif data.get("type") == "message_stop":
+                                yield f"data: {json.dumps({'done': True})}\n\n"
+                        except:
+                            pass
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Access-Control-Allow-Origin": "*"})
+
+
+@app.options("/claude")
+async def claude_options():
+    from fastapi.responses import Response
+    return Response(headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
+    })

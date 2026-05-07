@@ -323,7 +323,7 @@ Generate all images now. Do not skip any steps."""
 
                 # Parse out any image URLs or job IDs from the response
                 import re
-                urls = re.findall(r'https?://[^\s'"<>]+\.(?:png|jpg|jpeg|webp)', full_text)
+                urls = re.findall(r"https?://[^\s'\"<>]+\.(?:png|jpg|jpeg|webp)", full_text)
                 job_ids = re.findall(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', full_text)
 
                 # Save any found assets to Supabase

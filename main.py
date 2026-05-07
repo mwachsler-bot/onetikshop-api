@@ -307,26 +307,21 @@ Generate all images now. Do not skip any steps."""
                         ]
                     }
                 )
-                
-                if response.status_code != 200:
+              if response.status_code != 200:
                     error = response.text
                     yield f"data: {json.dumps({'error': f'Claude API error: {error[:200]}'})}\n\n"
                     return
 
                 result = response.json()
-                
-                # Extract text from response
                 full_text = ""
                 for block in result.get("content", []):
                     if block.get("type") == "text":
                         full_text += block.get("text", "")
 
-                # Parse out any image URLs or job IDs from the response
                 import re
-                urls = re.findall(r"https?://[^\s'\"<>]+\.(?:png|jpg|jpeg|webp)", full_text)
+                urls = re.findall(r'https?://[^\s"\'<>]+(?:\.png|\.jpg|\.jpeg|\.webp)', full_text)
                 job_ids = re.findall(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', full_text)
 
-                # Save any found assets to Supabase
                 saved_assets = []
                 asset_types = ['hero_shot', 'lifestyle_shot', 'ugc_shot', 'comparison_shot', 'product_video']
                 
@@ -353,27 +348,21 @@ Generate all images now. Do not skip any steps."""
                         if asset_res.status_code in [200, 201]:
                             saved_assets.append({"type": asset_type, "url": url})
 
-                yield f"data: {json.dumps({'status': 'complete', 'text': full_text, 'assets': saved_assets, 'urls': urls, 'job_ids': job_ids})}
-
-"
+                yield f"data: {json.dumps({'status': 'complete', 'text': full_text, 'assets': saved_assets, 'urls': urls, 'job_ids': job_ids})}\n\n"
 
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}
-
-"
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(
-        stream_visual_generation(),
-        media_type="text/event-stream",
+        stream_visual_generation(), 
+        media_type="text/event-stream", 
         headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"}
     )
-
 
 @app.options("/generate-visuals")
 async def generate_visuals_options():
     return Response(headers={
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Origin": "*", 
+        "Access-Control-Allow-Methods": "POST, OPTIONS", 
         "Access-Control-Allow-Headers": "Content-Type"
     })
-

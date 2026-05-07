@@ -308,7 +308,7 @@ Generate all images now. Do not skip any steps."""
                     }
                 )
                 
-             if response.status_code != 200:
+                if response.status_code != 200:
                     error = response.text
                     yield f"data: {json.dumps({'error': f'Claude API error: {error[:200]}'})}\n\n"
                     return

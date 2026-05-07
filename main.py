@@ -312,7 +312,7 @@ Generate all images now. Do not skip any steps."""
                     error = response.text
                     yield f"data: {json.dumps({'error': f'Claude API error: {error[:200]}'})}\n\n"
 
-"
+
                     return
 
                 result = response.json()
